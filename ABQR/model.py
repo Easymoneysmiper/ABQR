@@ -77,9 +77,54 @@ class GraphAttentionLayer(nn.Module):
 
         return dd
 
-class GCNConv(nn.Module):
+MIN_NORM = 1e-15
+
+def tanh(x, clamp=15):
+    return x.clamp(-clamp, clamp).tanh()
+
+def artanh(x):
+    x = x.clamp(-1 + 1e-7, 1 - 1e-7)
+    return (torch.log(1 + x).sub(torch.log(1 - x))).mul(0.5)
+
+def project(x, c):
+    norm = torch.norm(x, p=2, dim=-1, keepdim=True).clamp_min(MIN_NORM)
+    maxnorm = (1.0 - 1e-5) / (c ** 0.5)
+    cond = norm > maxnorm
+    projected = x / norm * maxnorm
+    return torch.where(cond, projected, x)
+
+def expmap0(u, c):
+    sqrt_c = c ** 0.5
+    u_norm = torch.norm(u, p=2, dim=-1, keepdim=True).clamp_min(MIN_NORM)
+    gamma_1 = tanh(sqrt_c * u_norm) * u / (sqrt_c * u_norm)
+    return project(gamma_1, c)
+
+def logmap0(y, c):
+    sqrt_c = c ** 0.5
+    y_norm = torch.norm(y, p=2, dim=-1, keepdim=True).clamp_min(MIN_NORM)
+    return y / y_norm / sqrt_c * artanh(sqrt_c * y_norm)
+
+def mobius_add(x, y, c):
+    x2 = torch.sum(x * x, dim=-1, keepdim=True)
+    y2 = torch.sum(y * y, dim=-1, keepdim=True)
+    xy = torch.sum(x * y, dim=-1, keepdim=True)
+    num = (1 + 2 * c * xy + c * y2) * x + (1 - c * x2) * y
+    denom = 1 + 2 * c * xy + c ** 2 * x2 * y2
+    return project(num / denom.clamp_min(MIN_NORM), c)
+
+def mobius_matvec(m, x, c):
+    sqrt_c = c ** 0.5
+    x_norm = torch.norm(x, p=2, dim=-1, keepdim=True).clamp_min(MIN_NORM)
+    mx = torch.matmul(x, m)
+    mx_norm = torch.norm(mx, p=2, dim=-1, keepdim=True).clamp_min(MIN_NORM)
+    res_c = tanh(mx_norm / x_norm * artanh(sqrt_c * x_norm)) * mx / (mx_norm * sqrt_c)
+    cond = (mx == 0).all(dim=-1, keepdim=True)
+    res_c = torch.where(cond, mx, res_c)
+    return project(res_c, c)
+
+class HyperGCNConv(nn.Module):
     def __init__(self, in_dim, out_dim, p):
-        super(GCNConv, self).__init__()
+        super(HyperGCNConv, self).__init__()
 
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -91,15 +136,32 @@ class GCNConv(nn.Module):
         nn.init.zeros_(self.b)
 
         self.dropout = nn.Dropout(p=p)
+        self.c = nn.Parameter(torch.tensor([1.0]))  # Curvature
 
     def forward(self, x, adj):
-        adj = glo.get_value('matrix')
+        # 强行使用全局matrix以兼容原有逻辑
+        adj_global = glo.get_value('matrix')
 
         x = self.dropout(x)
-        x = torch.matmul(x, self.w)
-        x = torch.sparse.mm(adj.float(), x)
-        x = x + self.b
-        return x
+        
+        # 1. Map Euclidean features to Hyperbolic space (Poincaré ball)
+        h = expmap0(x, self.c)
+        
+        # 2. Mobius matrix multiplication
+        h = mobius_matvec(self.w, h, self.c)
+        
+        # 3. Tangent space aggregation for sparse graphs
+        h_tangent = logmap0(h, self.c)
+        h_agg_tangent = torch.sparse.mm(adj_global.float(), h_tangent)
+        h_agg = expmap0(h_agg_tangent, self.c)
+        
+        # 4. Mobius addition for bias
+        b_hyp = expmap0(self.b, self.c)
+        h_out = mobius_add(h_agg, b_hyp, self.c)
+        
+        # 5. Map back to Euclidean space
+        out = logmap0(h_out, self.c)
+        return out
 
 class MLP_Predictor(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
@@ -211,9 +273,9 @@ class BGRL(nn.Module):
 
         # self.online_encoder = GraphAttentionLayer(d, d, 0.2, p)
 
-        self.online_encoder = GCNConv(d, d, p)
+        self.online_encoder = HyperGCNConv(d, d, p)
 
-        self.decoder = GCNConv(d, d, p)
+        self.decoder = HyperGCNConv(d, d, p)
 
         self.predictor = MLP_Predictor(d, d, d)
 
@@ -364,7 +426,7 @@ class ABQR(nn.Module):
 
         self.gcl = BGRL(d, p, drop_feat1, drop_feat2, drop_edge1, drop_edge2)
 
-        self.gcn = GCNConv(d, d, p)
+        self.gcn = HyperGCNConv(d, d, p)
 
         self.pro_embed = nn.Parameter(torch.ones((pro_max, d)))
         nn.init.xavier_uniform_(self.pro_embed)
