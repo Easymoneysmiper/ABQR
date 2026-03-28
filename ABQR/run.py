@@ -66,7 +66,7 @@ def run_epoch(skill_path, matrix, max_problem, path, batch_size, is_train, min_p
             nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
-            model.gcl.update_target_network(glo.get_value('mm'))
+            # model.gcl.update_target_network(glo.get_value('mm')) # Removed contrastive learning
 
             labels.extend(next_true.view(-1).data.cpu().numpy())
             outputs.extend(next_predict.view(-1).data.cpu().numpy())

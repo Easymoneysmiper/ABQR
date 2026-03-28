@@ -424,7 +424,7 @@ class ABQR(nn.Module):
 
         # self.gcl = Multi_level_GCL(positive_matrix, contrast_batch, tau, lamda1, top_k, d, p, head, graph_aug, gnn_mode)
 
-        self.gcl = BGRL(d, p, drop_feat1, drop_feat2, drop_edge1, drop_edge2)
+        # self.gcl = BGRL(d, p, drop_feat1, drop_feat2, drop_edge1, drop_edge2)  # Removed contrastive learning
 
         self.gcn = HyperGCNConv(d, d, p)
 
@@ -510,9 +510,12 @@ class ABQR(nn.Module):
 
         batch, seq = last_pro.shape[0], last_pro.shape[1]
 
-        pro_embed, contrast_loss = self.gcl(self.pro_embed, matrix, perb)
+        # Removed BGRL contrastive learning part
+        x_embed = self.pro_embed if perb is None else self.pro_embed + perb
+        pro_embed = x_embed + self.gcn(x_embed, matrix)
+        contrast_loss = 0.0
 
-        contrast_loss = 0.1 * contrast_loss
+        # contrast_loss = 0.1 * contrast_loss
 
         last_pro_embed = F.embedding(last_pro, pro_embed)
         next_pro_embed = F.embedding(next_pro, pro_embed)

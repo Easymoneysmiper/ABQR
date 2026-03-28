@@ -3,7 +3,7 @@ def _init():
     _global_dict = {}
 
 def set_value(key, value):
-    _global_dict[key] = value
+    _global_dict[key] = value 
 
 def get_value(key, defValue=None):
     return _global_dict[key]
